@@ -1,0 +1,482 @@
+---
+title: "Dravet Prediction Model"
+author: "Chong Kim"
+date: "March 7, 2017"
+output:
+  word_document: default
+  html_document: default
+  number_sections: yes
+  pdf_document: default
+  fig_caption: yes
+---
+
+```{r setup, include=FALSE}
+library(knitr)
+knitr::opts_chunk$set(fig.width=12, fig.height=8, fig.path='Figs/',
+                      echo=FALSE, warning=FALSE, message=FALSE)
+```
+
+```{r, echo=FALSE}
+#
+# table numbers
+#
+tabNumRankByDscpl <- 1
+
+#
+# figure numbers
+#
+FigNumYrsFacRank <- 1
+FigNumBoxDscplFacRank <- 2
+FigNumGenYrsFacDscpl <- 3
+FigNumBoxGenRankFacDscpl <- 4
+```
+
+### Objective
+
+Find algorithm/equation to best differentiate severe (dravet and infantile spasm) from mild state.
+
+#### Steps
+
+1. Data Management
+2. Model Building
+3. Evaluation of Model
+4. Conslusion/Summary
+
+
+#### Step 1: Data Management
+
+***1a : Merge Chronic Comorbidity data with Patient Record Data***
+
+```{r , echo=FALSE, message=FALSE, warnings=FALSE}
+library(caret)
+rm(list=ls())
+comorb <- read.csv("C:/Users/ck/Dropbox/Research/Jon and CK/Dravet/Aim3 Algorithm/Data/Complex Chronic Conditions.csv")
+comorb <- comorb[,c(1:2,397:410)] #Only the last 13 columns that summarize the chronic conditions
+drav <- read.csv("C:/Users/ck/Dropbox/Research/Jon and CK/Dravet/Aim3 Algorithm/Data/Cases and Controls_Summary Dataset_One Record per Patient_11-21-2016.csv")
+total <- merge(comorb,drav,by="UNIQUE_ID")
+```
+
+
+***1b : Merge Medication data with Patient Record Data***
+
+```{r , echo=FALSE, message=FALSE, warnings=FALSE}
+library(plyr)
+med <- read.csv("C:/Users/ck/Dropbox/Research/Jon and CK/Dravet/Aim3 Algorithm/Data/medications.csv")
+
+
+#Use top 5 dravet medications
+med$clobazam <- ifelse(med$GENERIC_NAME == "CloBAZam", 1, 0)
+med$midazolam <- ifelse(med$GENERIC_NAME == "Midazolam HCl", 1, 0)
+med$DIAZEPAM <- ifelse(med$GENERIC_NAME == "DiazePAM", 1, 0)
+med$Divalproex <- ifelse(med$GENERIC_NAME == "Divalproex Sodium", 1, 0)
+med$LevETIRAcetam <- ifelse(med$GENERIC_NAME == "LevETIRAcetam", 1, 0)
+
+#Top 1 for CAE
+med$CLONAZEPAM <- ifelse(med$GENERIC_NAME == "ClonazePAM", 1, 0)
+
+
+#Top 1 for ISLG
+med$nacl <- ifelse(med$GENERIC_NAME == "Sodium Chloride", 1, 0)
+
+#Make one patient one record for medication
+
+t <- med[which(med$GENERIC_NAME=="CloBAZam" | med$GENERIC_NAME == "Midazolam HCl" | med$GENERIC_NAME == "DiazePAM" | med$GENERIC_NAME == "Divalproex Sodium" | med$GENERIC_NAME == "LevETIRAcetam" | med$GENERIC_NAME == "ClonazePAM" | med$GENERIC_NAME == "Sodium Chloride"),]
+l<-count(t, c("UNIQUE_ID","GENERIC_NAME"))
+
+w <- reshape(l, 
+             timevar = "GENERIC_NAME",
+             idvar = c("UNIQUE_ID"),
+             direction = "wide")
+w <- as.data.frame(w)
+w[is.na(w)] <- 0
+
+total1 <- merge(w,total,by="UNIQUE_ID")
+kable(str(total1))
+```
+
+* The table is in a 'one-patient-one-record' form. The top 6 observations above indicate the structure of the data that will be used for the prediction modelling. 
+
+***1c : Discard unnecessary variables in prediction and make dummy variables for those that are necessary and non numeric***
+```{r , echo=FALSE, message=FALSE, warnings=FALSE}
+myvars <- names(total1) %in% c("UNIQUE_ID", "COHORT_ID", "MATCHED_TRIAD","INDEX_DATE_SHIFT","DISTANCE","ccc_flag") 
+total <- total1[!myvars]
+total$X <- NULL
+total <- total[,c(-12,-13,-14,-15,-17,-18,-20)]
+
+#Change variables that are factor variables
+names <- c('neuromusc_ccc','cvd_ccc','respiratory_ccc','congeni_genetic_ccc','tech_dep_ccc','SEX_NUM', 'INSURANCE')
+total[,names] <- lapply(total[,names] , factor)
+
+#Make integers into numeric now and change COHORT to integer afterwards as outcome
+total[sapply(total, is.integer)] <- lapply(total[sapply(total, is.integer)], as.numeric)
+total$COHORT <- as.integer(total$COHORT)
+
+#Dummyfy the factors
+totalDummy <- dummyVars("~.",data=total, fullRank=F)
+total <- as.data.frame(predict(totalDummy,total))
+
+#Rename COHORT to outcome
+outcomeName <- 'COHORT'
+predictorsNames <- names(total)[names(total) != outcomeName]
+```
+
+***1d : Missing data check***
+```{r , echo=FALSE, message=FALSE, warning=FALSE}
+# apply(total, 2, function(x) any(is.na(x)))
+total <- na.omit(total)
+mdt <- cbind(c("observations","variables"),dim(total))
+kable(mdt, col.names=c("Data","Values"))
+```
+
+* `r frequency(is.na(total))` person with missing insurance information excluded
+
+***1e : Combine the severe epilepsy group***
+
+```{r , echo=FALSE, message=FALSE, warning=FALSE}
+
+total$COHORT2 <- ifelse(total$COHORT==1,'Nonsevere','Severe')
+total$COHORT2 <- as.factor(total$COHORT2)
+outcomeName <- 'COHORT2'
+
+total$COHORT3 <- ifelse(total$COHORT==1, 1, 0)
+total$COHORT3 <- as.integer(total$COHORT3)
+outcomeName <- 'COHORT3'
+```
+
+***1f : Remove variables that produce Near Zero or Zero Variance***
+
+```{r , echo=FALSE, message=FALSE, warning=FALSE}
+
+nzv <- nearZeroVar(total, saveMetrics= TRUE)
+kable(nzv[nzv$nzv,][1:9,])
+
+nzv <- nearZeroVar(total)
+filteredtotal <- total[, -nzv]
+mdt <- cbind(c("observations","variables"),dim(filteredtotal))
+kable(mdt, ,col.names=c("Data","Values"))
+```
+
+* There are now `r dim(filteredtotal)[2]` variables in the dataset.
+
+***1g***: Split data into training and test.
+
+```{r , echo=FALSE, message=FALSE, warning=FALSE}
+colnames(filteredtotal)[3] <- "freq.divalproex"
+colnames(filteredtotal)[5] <- "freq.midazolamhcl"
+colnames(filteredtotal)[6] <- "freq.nacl"
+
+
+set.seed(1234)
+splitIndex <- createDataPartition(filteredtotal[,outcomeName], p = .6, list = FALSE, times = 1)
+trainDF <- filteredtotal[ splitIndex,]
+testDF  <- filteredtotal[-splitIndex,]
+```
+
+* Here we split the data into 60/40 (Training/Testing). 
+
+
+
+#####Logistic Regression Model 2
+
+
+***2A: GLM model without model selection***
+
+```{r , echo=FALSE, message=FALSE, warning=FALSE}
+library(MASS)
+
+total$COHORT3 <- ifelse(total$COHORT==1, 1, 0)
+total$COHORT3 <- as.integer(total$COHORT3)
+outcomeName <- 'COHORT3'
+
+model1 <- glm(COHORT3 ~ freq.midazolamhcl + freq.LevETIRAcetam + freq.divalproex + 
+               freq.nacl + PRESCRIPTION_COUNT + freq.DiazePAM + SEX_NUM.0 + SEX_NUM.1 +
+               respiratory_ccc.0 + respiratory_ccc.1 + cvd_ccc.0 + cvd_ccc.1 + neuromusc_ccc.0 + neuromusc_ccc.1 + TOTAL_OUTPATIENT_COUNT + 
+               congeni_genetic_ccc.0 + congeni_genetic_ccc.1 + tech_dep_ccc.0 + tech_dep_ccc.1 +
+               num_ccc + AGE_YEARS + freq.CloBAZam  + ED_COUNT + ICU_COUNT + IP_COUNT + 
+               PROCEDURE_COUNT + LAB_COUNT + TOTAL_CHARGES
+             ,family=binomial(link='logit'),data=trainDF)
+
+fitted.results <- predict(model1,testDF,type='response')
+fitted.results <- ifelse(fitted.results > 0.5,1,0)
+glmtab <- table(fitted.results, testDF$COHORT3)
+# confusionMatrix(glmtab)
+ cm1 <- as.data.frame(confusionMatrix(glmtab)[2])
+ct1 <- cm1[,3]
+dim(ct1) <- c(2,2)
+row.names(ct1) <- c("Severe","Non Severe")
+colnames(ct1) <- c("Severe","Non Severe")
+kable(ct1)
+# kable(confusionMatrix(glmtab)$byClass[1])
+# kable(confusionMatrix(glmtab)$overall[3])
+```
+
+* Given a 50% cutoff for predicting Severe vs. Non Severe cases, the ***sensitivity*** of the logistic regression model is `r confusionMatrix(glmtab)$byClass[1]`. 
+* Given a 50% cutoff for predicting Severe vs. Non Severe cases, the ***specificity*** of the logistic regression model is `r confusionMatrix(glmtab)$byClass[2]`. 
+* Given a 50% cutoff for predicting Severe vs. Non Severe cases, the ***positive predictive value*** of the logistic regression model is `r confusionMatrix(glmtab)$byClass[3]`. 
+* Given a 50% cutoff for predicting Severe vs. Non Severe cases, the ***negative predictive value*** of the logistic regression model is `r confusionMatrix(glmtab)$byClass[4]`. 
+* The ***accuracy*** of the model in terms of correctly classifying the outcome is `r confusionMatrix(glmtab)$overall[1]` and the 2x2 contingency table indicates that there are only `r t$table.Freq[2] + t$table.Freq[3]` out of the `r t$table.Freq[1] + t$table.Freq[2] + t$table.Freq[3] + t$table.Freq[4]` misclassified.
+
+
+```{r , echo=FALSE, message=FALSE, warning=FALSE}
+library(ROCR)
+
+p <- predict(model1, testDF, type="response")
+pr <- prediction(p, testDF$COHORT3)
+prf1 <- performance(pr, measure = "tpr", x.measure = "fpr")
+plot(prf1, colorize=TRUE)
+
+
+auc <- performance(pr, measure = "auc")
+auc <- auc@y.values[[1]]
+print(paste(c("AUC :",auc)))
+```
+
+* The Area Under the Curve (AUC) of the ROC curve is `r auc`, which indicates that the probability of the model correctly identifying Severe vs. Non severe is `r auc`. 
+
+
+***2B: Evaluation of GLM model with Stepwise Variable Selection and Using Total Filtered Population (not Train/Test split)***: 
+
+```{r , results="hide" }
+model2 <- glm(COHORT3 ~ freq.midazolamhcl + freq.LevETIRAcetam + freq.divalproex + 
+               freq.nacl + PRESCRIPTION_COUNT + freq.DiazePAM + SEX_NUM.0 + SEX_NUM.1 +
+               respiratory_ccc.0 + respiratory_ccc.1 + cvd_ccc.0 + cvd_ccc.1 + neuromusc_ccc.0 + neuromusc_ccc.1 + TOTAL_OUTPATIENT_COUNT  + 
+               congeni_genetic_ccc.0 + congeni_genetic_ccc.1 + tech_dep_ccc.0 + tech_dep_ccc.1 +
+               num_ccc + AGE_YEARS + freq.CloBAZam  + ED_COUNT + ICU_COUNT + IP_COUNT + 
+               PROCEDURE_COUNT + LAB_COUNT + TOTAL_CHARGES
+             ,family=binomial(link='logit'),data=trainDF)
+
+step <- stepAIC(model2,direction = "both") #Model 2 using training data stepwiseAIC
+
+model3 <- glm(COHORT3 ~ freq.midazolamhcl + freq.LevETIRAcetam + freq.divalproex + 
+               freq.nacl + PRESCRIPTION_COUNT + freq.DiazePAM + SEX_NUM.0 + SEX_NUM.1 +
+               respiratory_ccc.0 + respiratory_ccc.1 + cvd_ccc.0 + cvd_ccc.1 + neuromusc_ccc.0 + neuromusc_ccc.1 + TOTAL_OUTPATIENT_COUNT  + 
+               congeni_genetic_ccc.0 + congeni_genetic_ccc.1 + tech_dep_ccc.0 + tech_dep_ccc.1 +
+               num_ccc + AGE_YEARS + freq.CloBAZam  + ED_COUNT + ICU_COUNT + IP_COUNT + 
+               PROCEDURE_COUNT + LAB_COUNT + TOTAL_CHARGES
+             ,family=binomial(link='logit'),data=filteredtotal)
+
+step2 <- stepAIC(model3,direction = "both") #Model 3 using all data
+step3 <- step2
+step3 <- update(step3, ~ . - TOTAL_CHARGES) #Model 4 using all data w/o total charges
+```
+
+
+```{r , echo=FALSE, message=FALSE, warning=FALSE}
+#step$formula
+
+fitted.results <- predict(step,testDF,type='response')
+fitted.results <- ifelse(fitted.results > 0.5,1,0)
+glmtab <- table(fitted.results, testDF$COHORT3)
+
+cm1 <- as.data.frame(confusionMatrix(glmtab)[2])
+ct1 <- cm1[,3]
+dim(ct1) <- c(2,2)
+row.names(ct1) <- c("Severe","Non Severe")
+colnames(ct1) <- c("Severe","Non Severe")
+kable(ct1)
+#t <- as.data.frame(confusionMatrix(glmtab)[2])
+
+p <- predict(step, testDF, type="response")
+pr <- prediction(p, testDF$COHORT3)
+prf2 <- performance(pr, measure = "tpr", x.measure = "fpr")
+plot(prf2, colorize=TRUE)
+
+p2 <- predict(step2, testDF, type="response")
+pr2 <- prediction(p2, testDF$COHORT3)
+prf3 <- performance(pr2, measure = "tpr", x.measure = "fpr")
+
+p3 <- predict(step3, testDF, type="response")
+pr3 <- prediction(p3, testDF$COHORT3)
+prf4 <- performance(pr3, measure = "tpr", x.measure = "fpr")
+
+
+auc1 <- performance(pr, measure = "auc")
+auc1 <- auc1@y.values[[1]]
+auc2 <- performance(pr2, measure = "auc")
+auc2 <- auc2@y.values[[1]]
+auc3 <- performance(pr3, measure = "auc")
+auc3 <- auc3@y.values[[1]]
+
+
+print(paste(c("AUC :",auc1)))
+```
+
+
+* Using the new model created with stepwiseAIC variable selection, given a 50% cutoff for predicting Severe vs. Non Severe cases, the ***sensitivity*** of the logistic regression model is `r confusionMatrix(glmtab)$byClass[1]`. 
+* Given a 50% cutoff for predicting Severe vs. Non Severe cases, the ***specificity*** of the logistic regression model is `r confusionMatrix(glmtab)$byClass[2]`. 
+* Given a 50% cutoff for predicting Severe vs. Non Severe cases, the ***positive predictive value*** of the logistic regression model is `r confusionMatrix(glmtab)$byClass[3]`. 
+* Given a 50% cutoff for predicting Severe vs. Non Severe cases, the ***negative predictive value*** of the logistic regression model is `r confusionMatrix(glmtab)$byClass[4]`. 
+* The ***accuracy*** of the model in terms of correctly classifying the outcome is `r confusionMatrix(glmtab)$overall[1]` and the 2x2 contingency table indicates that there are only `r t$table.Freq[2] + t$table.Freq[3]` out of the `r t$table.Freq[1] + t$table.Freq[2] + t$table.Freq[3] + t$table.Freq[4]` misclassified.
+* The new model includes variables `r all.vars(step$formula)` which are frequency of Levetiracetam prescribed, Count of # of cardio-vascular chronic comorbid conditions, Count of # of neuro-muscuclar chronic comorbid conditions, Count of total oupatient claims, Count of # of congenial genetic chronic comorbid conditions, Total # of chronic comorbid conditions, frequency of Clobazam prescribed, Count of # of ICU claims, and Count of # of procedure claims. 
+
+
+***2C: Visual Comparison of Model***
+
+```{r , echo=FALSE, message=FALSE, warning=FALSE}
+plot(prf1, col='red')
+plot(prf2, add=TRUE, col='blue')
+plot(prf3, add=TRUE, col='green')
+plot(prf4, add=TRUE, col='yellow')
+
+legend("bottomright", # places a legend at the appropriate place \
+c('Model 1','Model 2', 'Model 3','Model 4'), # puts text in the legend
+lty=c(1,1,1,1), # gives the legend appropriate symbols (lines)
+lwd=c(2.5,2.5,2.5,2.5),col=c('red','blue','green','yellow')) # gives the legend lines the correct color and width
+```
+
+* Based on the AUC statistics, the new model (stepwiseAIC using train/test split) yields a slightly higher ***AUC*** of `r auc1` vs. `r auc`. The 2 additional new models created by using all of the data (no test/train split with/without the total charges variable included) has an AUC of `r auc2` and `r auc3`. One thing to note is that Model 1 and Model 2 were both trained using the training data that was created with a 60/40 split whereas Model 3 and Model 4 was built using all of the data thus the AUC will be higher for the latter models.
+
+
+***2D: Regression parameters using Model 1,2,3 and 4***
+```{r , echo=FALSE, message=FALSE, warning=FALSE, results='asis'}
+library(memisc)
+library(texreg)
+#now run regression on the whole cohort
+htmlreg(list(model1, step, step2, step3),
+        caption="Logistic Regression Parameter estimates for Models 1,2,3, and 4",
+        dcolumn=FALSE,
+        model.names=c("Model 1","Model 2","Model 3","Model 4"), digits = 5,
+        single.row=TRUE)
+```
+
+* Interpretations below are using Model 3 (Regression Model built using all observations)
+
+* Based on the regression parameters estimated, frequency of Levetiracetam, prescription count, diagnosis of cardiovascular disease chronic comorbid condition, diagnosis of neuromuscular chronic comorbid condition, count of outpatient claims, diagnosis of congenital genetic chronic comorbid condition, procedure count, and total charges had a statistically significant association with the severity of Dravet (p<0.05 for all).
+
+* There is a higher probability of being classified as Non severe epilepsy for increased prescription count, increased total outpatient count, and diagnosis of cardio vascular chronic comorbid condition. 
+
+* There is a higher probability of being classified as Severe epilepsy for increased freqeuncy of Levetiracetam prescription fill, diagnosis of neuromuscular chronic comorbid condition, diagnosis of congenital genetic chronic comorbid condition, and increased # of procedure count. 
+
+* The odds of being classified as Non severe epileptic (i.e. Childhood Absence Epilepsy) decreases by a factor of `r exp(step$coefficients[7])` for a one unit increase in the # of outpatient claims. 
+
+* The odds of being classified as Non severe epileptic (i.e. Childhood Absence Epilepsy) decreases by a factor of `r exp(step$coefficients[5])` for having a diagnosis of cardiovascular chronic comorbid condition. 
+
+* The odds of being classified as Non severe epileptic (i.e. Childhood Absence Epilepsy) increases by a factor of `r exp(step$coefficients[8])` for having a diagnosis of congenital genetic chronic comorbid condition. 
+
+
+***2D_2: Regression parameters using all Data without Total Charge***
+```{r , echo=FALSE, message=FALSE, warning=FALSE, results='asis'}
+library(memisc)
+library(texreg)
+#now run regression on the whole cohort
+htmlreg(list(step3),
+        caption="Logistic Regression Parameter estimates for Model 3",
+        dcolumn=FALSE,
+        model.names=c("Model 2"), digits = 5,
+        single.row=TRUE)
+```
+
+***Probability of classified as Non Severe Epilepsy: adjusting Prescription claims***
+```{r , echo=FALSE, message=FALSE, warning=FALSE, results='asis'}
+#Setting procedure count to 10
+newdata1 <- with(filteredtotal, data.frame(freq.LevETIRAcetam = mean(freq.LevETIRAcetam), cvd_ccc.0 = mean(cvd_ccc.0), neuromusc_ccc.0 = mean(neuromusc_ccc.0), TOTAL_OUTPATIENT_COUNT = mean(TOTAL_OUTPATIENT_COUNT), congeni_genetic_ccc.0 = mean(congeni_genetic_ccc.0), num_ccc = mean(num_ccc), freq.CloBAZam = mean(freq.CloBAZam), ICU_COUNT=mean(ICU_COUNT), PROCEDURE_COUNT=mean(PROCEDURE_COUNT), freq.DiazePAM = mean(freq.DiazePAM) ,TOTAL_CHARGES=mean(TOTAL_CHARGES), PRESCRIPTION_COUNT=20))
+newdata1$Proc_P <- predict(step2,newdata=newdata1,type="response")
+#Setting procedure count to 8
+newdata2 <- with(filteredtotal, data.frame(freq.LevETIRAcetam = mean(freq.LevETIRAcetam), cvd_ccc.0 = mean(cvd_ccc.0), neuromusc_ccc.0 = mean(neuromusc_ccc.0), TOTAL_OUTPATIENT_COUNT = mean(TOTAL_OUTPATIENT_COUNT), congeni_genetic_ccc.0 = mean(congeni_genetic_ccc.0), num_ccc = mean(num_ccc), freq.CloBAZam = mean(freq.CloBAZam), ICU_COUNT=mean(ICU_COUNT), PROCEDURE_COUNT=mean(PROCEDURE_COUNT),freq.DiazePAM = mean(freq.DiazePAM) , TOTAL_CHARGES=mean(TOTAL_CHARGES), PRESCRIPTION_COUNT=15))
+newdata2$Proc_P <- predict(step2,newdata=newdata2,type="response")
+#Setting procedure count to 6
+newdata3 <- with(filteredtotal, data.frame(freq.LevETIRAcetam = mean(freq.LevETIRAcetam), cvd_ccc.0 = mean(cvd_ccc.0), neuromusc_ccc.0 = mean(neuromusc_ccc.0), TOTAL_OUTPATIENT_COUNT = mean(TOTAL_OUTPATIENT_COUNT), congeni_genetic_ccc.0 = mean(congeni_genetic_ccc.0), num_ccc = mean(num_ccc), freq.CloBAZam = mean(freq.CloBAZam), ICU_COUNT=mean(ICU_COUNT), PROCEDURE_COUNT=mean(PROCEDURE_COUNT), freq.DiazePAM = mean(freq.DiazePAM) ,TOTAL_CHARGES=mean(TOTAL_CHARGES), PRESCRIPTION_COUNT=10))
+newdata3$Proc_P <- predict(step2,newdata=newdata3,type="response")
+#Setting procedure count to 4
+newdata4 <- with(filteredtotal, data.frame(freq.LevETIRAcetam = mean(freq.LevETIRAcetam), cvd_ccc.0 = mean(cvd_ccc.0), neuromusc_ccc.0 = mean(neuromusc_ccc.0), TOTAL_OUTPATIENT_COUNT = mean(TOTAL_OUTPATIENT_COUNT), congeni_genetic_ccc.0 = mean(congeni_genetic_ccc.0), num_ccc = mean(num_ccc), freq.CloBAZam = mean(freq.CloBAZam), ICU_COUNT=mean(ICU_COUNT), PROCEDURE_COUNT=mean(PROCEDURE_COUNT),freq.DiazePAM = mean(freq.DiazePAM) , TOTAL_CHARGES=mean(TOTAL_CHARGES), PRESCRIPTION_COUNT=5))
+newdata4$Proc_P <- predict(step2,newdata=newdata4,type="response")
+#Setting procedure count to 2
+newdata5 <- with(filteredtotal, data.frame(freq.LevETIRAcetam = mean(freq.LevETIRAcetam), cvd_ccc.0 = mean(cvd_ccc.0), neuromusc_ccc.0 = mean(neuromusc_ccc.0), TOTAL_OUTPATIENT_COUNT = mean(TOTAL_OUTPATIENT_COUNT), congeni_genetic_ccc.0 = mean(congeni_genetic_ccc.0), num_ccc = mean(num_ccc), freq.CloBAZam = mean(freq.CloBAZam), ICU_COUNT=mean(ICU_COUNT), PROCEDURE_COUNT=mean(PROCEDURE_COUNT), freq.DiazePAM = mean(freq.DiazePAM) ,TOTAL_CHARGES=mean(TOTAL_CHARGES), PRESCRIPTION_COUNT=2))
+newdata5$Proc_P <- predict(step2,newdata=newdata5,type="response")
+
+combineddata <- rbind(newdata5, newdata4, newdata3, newdata2)
+colnames(combineddata[10]) <- "Prob. of NS"
+kable(combineddata)
+```
+
+* After setting all variables to their mean values except for # of procedure claims, adjusting the values of the # of procedure claims indicate that the probability of being classified as non severe epilepsy is `r round(combineddata[1,13],3)`, `r round(combineddata[2,13],3)`, `r round(combineddata[3,13],3)`, `r round(combineddata[4,13],3)` as we adjust the # of procedure claims to `r combineddata$PRESCRIPTION_COUNT[1]`,`r combineddata$PRESCRIPTION_COUNT[2]`,`r combineddata$PRESCRIPTION_COUNT[3]`,`r combineddata$PRESCRIPTION_COUNT[4]`, respectively. 
+
+***Probability of classified as Non Severe Epilepsy: Adjusting TOTAL_OUTPATIENT_COUNT***
+```{r , echo=FALSE, message=FALSE, warning=FALSE, results='asis'}
+#Setting procedure count to 10
+newdata1 <- with(filteredtotal, data.frame(freq.LevETIRAcetam = mean(freq.LevETIRAcetam), cvd_ccc.0 = mean(cvd_ccc.0), neuromusc_ccc.0 = mean(neuromusc_ccc.0), TOTAL_OUTPATIENT_COUNT = 5, congeni_genetic_ccc.0 = mean(congeni_genetic_ccc.0), num_ccc = mean(num_ccc), freq.CloBAZam = mean(freq.CloBAZam), ICU_COUNT=mean(ICU_COUNT), PROCEDURE_COUNT=mean(PROCEDURE_COUNT), freq.DiazePAM = mean(freq.DiazePAM) ,TOTAL_CHARGES=mean(TOTAL_CHARGES), PRESCRIPTION_COUNT=mean(PRESCRIPTION_COUNT)))
+newdata1$Proc_P <- predict(step2,newdata=newdata1,type="response")
+#Setting procedure count to 8
+newdata2 <- with(filteredtotal, data.frame(freq.LevETIRAcetam = mean(freq.LevETIRAcetam), cvd_ccc.0 = mean(cvd_ccc.0), neuromusc_ccc.0 = mean(neuromusc_ccc.0), TOTAL_OUTPATIENT_COUNT = 4, congeni_genetic_ccc.0 = mean(congeni_genetic_ccc.0), num_ccc = mean(num_ccc), freq.CloBAZam = mean(freq.CloBAZam), ICU_COUNT=mean(ICU_COUNT), PROCEDURE_COUNT=mean(PROCEDURE_COUNT),freq.DiazePAM = mean(freq.DiazePAM) ,TOTAL_CHARGES=mean(TOTAL_CHARGES), PRESCRIPTION_COUNT=mean(PRESCRIPTION_COUNT)))
+newdata2$Proc_P <- predict(step2,newdata=newdata2,type="response")
+#Setting procedure count to 6
+newdata3 <- with(filteredtotal, data.frame(freq.LevETIRAcetam = mean(freq.LevETIRAcetam), cvd_ccc.0 = mean(cvd_ccc.0), neuromusc_ccc.0 = mean(neuromusc_ccc.0), TOTAL_OUTPATIENT_COUNT = 3, congeni_genetic_ccc.0 = mean(congeni_genetic_ccc.0), num_ccc = mean(num_ccc), freq.CloBAZam = mean(freq.CloBAZam), ICU_COUNT=mean(ICU_COUNT), PROCEDURE_COUNT=mean(PROCEDURE_COUNT),freq.DiazePAM = mean(freq.DiazePAM) , TOTAL_CHARGES=mean(TOTAL_CHARGES), PRESCRIPTION_COUNT=mean(PRESCRIPTION_COUNT)))
+newdata3$Proc_P <- predict(step2,newdata=newdata3,type="response")
+#Setting procedure count to 4
+newdata4 <- with(filteredtotal, data.frame(freq.LevETIRAcetam = mean(freq.LevETIRAcetam), cvd_ccc.0 = mean(cvd_ccc.0), neuromusc_ccc.0 = mean(neuromusc_ccc.0), TOTAL_OUTPATIENT_COUNT = 2, congeni_genetic_ccc.0 = mean(congeni_genetic_ccc.0), num_ccc = mean(num_ccc), freq.CloBAZam = mean(freq.CloBAZam), ICU_COUNT=mean(ICU_COUNT), PROCEDURE_COUNT=mean(PROCEDURE_COUNT),freq.DiazePAM = mean(freq.DiazePAM) ,TOTAL_CHARGES=mean(TOTAL_CHARGES), PRESCRIPTION_COUNT=mean(PRESCRIPTION_COUNT)))
+newdata4$Proc_P <- predict(step2,newdata=newdata4,type="response")
+#Setting procedure count to 2
+newdata5 <- with(filteredtotal, data.frame(freq.LevETIRAcetam = mean(freq.LevETIRAcetam), cvd_ccc.0 = mean(cvd_ccc.0), neuromusc_ccc.0 = mean(neuromusc_ccc.0), TOTAL_OUTPATIENT_COUNT = 1, congeni_genetic_ccc.0 = mean(congeni_genetic_ccc.0), num_ccc = mean(num_ccc), freq.CloBAZam = mean(freq.CloBAZam), ICU_COUNT=mean(ICU_COUNT), PROCEDURE_COUNT=mean(PROCEDURE_COUNT),freq.DiazePAM = mean(freq.DiazePAM) ,TOTAL_CHARGES=mean(TOTAL_CHARGES), PRESCRIPTION_COUNT=mean(PRESCRIPTION_COUNT)))
+newdata5$Proc_P <- predict(step2,newdata=newdata5,type="response")
+
+combineddata <- rbind(newdata5, newdata4, newdata3, newdata2, newdata1)
+colnames(combineddata[10]) <- "Prob. of NS"
+kable(combineddata)
+```
+
+* After setting all variables to their mean values except for # of total outpatient claims, adjusting the values of the # of total outpatient claims indicate that the probability of being classified as non severe epilepsy is `r round(combineddata[1,13],3)`, `r round(combineddata[2,13],3)`, `r round(combineddata[3,13],3)`, `r round(combineddata[4,13],3)`,`r round(combineddata[5,13],3)` as we adjust the # of procedure claims to `r combineddata$TOTAL_OUTPATIENT_COUNT[1]`,`r combineddata$TOTAL_OUTPATIENT_COUNT[2]`,`r combineddata$TOTAL_OUTPATIENT_COUNT[3]`,`r combineddata$TOTAL_OUTPATIENT_COUNT[4]`, and `r combineddata$TOTAL_OUTPATIENT_COUNT[5]`, respectively.  
+
+***2E***: Table 1 of Patient Characteristics according to the chosen variables
+``` {r Table1setup, echo=FALSE, include=FALSE}
+library(pander)
+panderOptions('table.split.table', Inf)
+set.caption('Table 1. Baseline Demographic/Clinical Characteristics of Study Population')
+
+library(tableone)
+#Create a variable list which we want in Table 1
+listVars <- c("AGE_YEARS", "SEX_NUM", "freq.LevETIRAcetam", "PRESCRIPTION_COUNT", "freq.DiazePAM" , "cvd_ccc" , "neuromusc_ccc", "TOTAL_OUTPATIENT_COUNT" , "congeni_genetic_ccc", "PROCEDURE_COUNT", "TOTAL_CHARGES", "freq.CloBAZam", "ICU_COUNT")
+
+#Define categorical variables
+catVars <- c("SEX_NUM", "cvd_ccc", "neuromusc_ccc", "congeni_genetic_ccc")
+
+
+#table 1 stratified and non-stratified
+#Need to use nonnormal distribution for some of the variables
+
+table1 <- CreateTableOne(vars = listVars, data = total1, factorVars = catVars)
+tab1mat <- print(table1, exact = c("SEX_NUM"), showAllLevels = TRUE, floating=FALSE,latex.environments=NULL, booktabs=TRUE)
+```
+
+```{r Table1, echo=FALSE}
+pander(tab1mat)
+```
+
+
+***2F***: Histogram to see distribution of variables
+
+``` {r histogram, echo=FALSE, warning=FALSE}
+
+library(grid)
+vplayout <- function(x, y) viewport(layout.pos.row = x, layout.pos.col = y)
+
+par(mfrow=c(2,2))
+plot1<-ggplot(total1, aes(AGE_YEARS)) + geom_histogram() + ggtitle("Histogram of AGE_YEARS")
+plot2<-ggplot(total1, aes(SEX_NUM)) + geom_histogram() + ggtitle("Histogram of SEX_NUM")
+plot3<-ggplot(total1, aes(freq.LevETIRAcetam)) + geom_histogram() + ggtitle("Histogram of freq.LevETIRAcetam")
+plot4<-ggplot(total1, aes(PRESCRIPTION_COUNT)) + geom_histogram() + ggtitle("Histogram of PRESCRIPTION_COUNT")
+plot5<-ggplot(total1, aes(freq.DiazePAM)) + geom_histogram() + ggtitle("Histogram of freq.DiazePAM")
+plot6<-ggplot(total1, aes(cvd_ccc)) + geom_histogram() + ggtitle("Histogram of cvd_ccc")
+plot7<-ggplot(total1, aes(neuromusc_ccc)) + geom_histogram() + ggtitle("Histogram of neuromusc_ccc")
+plot8<-ggplot(total1, aes(TOTAL_OUTPATIENT_COUNT)) + geom_histogram() + ggtitle("Histogram of TOTAL_OUTPATIENT_COUNT")
+plot9<-ggplot(total1, aes(congeni_genetic_ccc)) + geom_histogram() + ggtitle("Histogram of congeni_genetic_ccc")
+plot10<-ggplot(total1, aes(PROCEDURE_COUNT)) + geom_histogram() + ggtitle("Histogram of PROCEDURE_COUNT")
+plot11<-ggplot(total1, aes(TOTAL_CHARGES)) + geom_histogram() + ggtitle("Histogram of TOTAL_CHARGES")
+plot12<-ggplot(total1, aes(freq.CloBAZam)) + geom_histogram() + ggtitle("Histogram of freq.CloBAZam")
+plot13<-ggplot(total1, aes(ICU_COUNT)) + geom_histogram() + ggtitle("Histogram of ICU_COUNT")
+grid.newpage()
+pushViewport(viewport(layout = grid.layout(7, 2)))
+print(plot1, vp = vplayout(1, 1))
+print(plot2, vp = vplayout(1, 2))
+print(plot3, vp = vplayout(2, 1))
+print(plot4, vp = vplayout(2, 2))
+print(plot5, vp = vplayout(3, 1))
+print(plot6, vp = vplayout(3, 2))
+print(plot7, vp = vplayout(4, 1))
+print(plot8, vp = vplayout(4, 2))
+print(plot9, vp = vplayout(5, 1))
+print(plot10, vp = vplayout(5, 2))
+print(plot11, vp = vplayout(6, 1))
+print(plot12, vp = vplayout(6, 2))
+print(plot13, vp = vplayout(7, 1))
+
+```
