@@ -21,6 +21,7 @@ rm(list=ls())
 #Load libraries and data
 install.packages("corrplot")
 install.packages("AppliedPredictiveModeling")
+install.packages("ggplot2")
 
 library(caret)
 library(ggplot2)
@@ -195,52 +196,52 @@ final$COHORT2 <- NULL
 
 #3. Data Splitting####
 
-#Objective: Undergo test and train data splitting for determining optimal tuning parameter and model
-
-#Set seed to reproduce the data
-set.seed(1)
-
-trainingrow <- createDataPartition(
-  filteredtotal$COHORT2,
-  p=0.8,
-  list=FALSE
-)
-
-head(trainingrow)
-
-#Subset data into predictors and classes
-myvars <- names(filteredtotal) %in% c("UNIQUE_ID", "COHORT2","COHORT") 
-trainPredictors <-  filteredtotal[trainingrow, !myvars]
-myvars <- names(filteredtotal) %in% c( "COHORT2") 
-trainClasses <- filteredtotal[trainingrow, myvars]
-
-#create test set
-myvars <- names(filteredtotal) %in% c("UNIQUE_ID", "COHORT2","COHORT") 
-testPredictors <-  filteredtotal[-trainingrow, !myvars]
-myvars <- names(filteredtotal) %in% c( "COHORT2") 
-testClasses <- filteredtotal[-trainingrow, myvars]
-
-
-#Resampling test/train 3 times
-
-repeatedSplits <- createDataPartition(
-  trainClasses,
-  p=0.8,
-  times = 3
-)
-
-# 10 fold cross validation
-cvSplits <- createFolds(trainClasses,
-                        k=10,
-                        returnTrain = TRUE)
-
-str(cvSplits)
-fold1 <- cvSplits[[1]] # get the first fold
-cvPredictors1 <- trainPredictors[fold1,]
-cvClasses1 <- trainClasses[fold1]
-
-nrow(trainPredictors)
-nrow(cvPredictors1) # There is a difference bc cross validation resampling doesn't use the whole sample
+# #Objective: Undergo test and train data splitting for determining optimal tuning parameter and model
+# 
+# #Set seed to reproduce the data
+# set.seed(1)
+# 
+# trainingrow <- createDataPartition(
+#   filteredtotal$COHORT2,
+#   p=0.8,
+#   list=FALSE
+# )
+# 
+# head(trainingrow)
+# 
+# #Subset data into predictors and classes
+# myvars <- names(filteredtotal) %in% c("UNIQUE_ID", "COHORT2","COHORT") 
+# trainPredictors <-  filteredtotal[trainingrow, !myvars]
+# myvars <- names(filteredtotal) %in% c( "COHORT2") 
+# trainClasses <- filteredtotal[trainingrow, myvars]
+# 
+# #create test set
+# myvars <- names(filteredtotal) %in% c("UNIQUE_ID", "COHORT2","COHORT") 
+# testPredictors <-  filteredtotal[-trainingrow, !myvars]
+# myvars <- names(filteredtotal) %in% c( "COHORT2") 
+# testClasses <- filteredtotal[-trainingrow, myvars]
+# 
+# 
+# #Resampling test/train 3 times
+# 
+# repeatedSplits <- createDataPartition(
+#   trainClasses,
+#   p=0.8,
+#   times = 3
+# )
+# 
+# # 10 fold cross validation
+# cvSplits <- createFolds(trainClasses,
+#                         k=10,
+#                         returnTrain = TRUE)
+# 
+# str(cvSplits)
+# fold1 <- cvSplits[[1]] # get the first fold
+# cvPredictors1 <- trainPredictors[fold1,]
+# cvClasses1 <- trainClasses[fold1]
+# 
+# nrow(trainPredictors)
+# nrow(cvPredictors1) # There is a difference bc cross validation resampling doesn't use the whole sample
 
 
 #Use the final dataset that contains pre-processed predictors and the cohort information
@@ -252,7 +253,7 @@ finalTest  <- final[-inTrain, ]
 #Check proportion of severe vs. nonsevere to see if data is imbalanced
 prop.table(table(finalTest$Class)) #nonsevere only 22% so oversample nonsevere
 
-#install.packages("DMwR")
+install.packages("DMwR")
 library(DMwR)
 
 finalTrain <- SMOTE(Class ~ ., finalTrain, k=5 ,perc.over = 500, perc.under=100)
